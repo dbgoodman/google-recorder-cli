@@ -112,28 +112,16 @@ function decryptCookieValue(encryptedValue: Buffer, key: Buffer): string {
 }
 
 /**
- * Extract Google cookies from Chrome's cookie database.
+ * Core cookie extraction logic. Returns true on success.
  */
-export async function extractChromeCookies(authUser: number): Promise<void> {
-  console.log('Chrome Cookie Extraction');
-  console.log('========================\n');
-
-  // Check Chrome cookies database exists
+function extractCookiesCore(authUser: number): boolean {
   if (!existsSync(CHROME_COOKIES_PATH)) {
-    console.error('Chrome cookie database not found at:');
-    console.error(`  ${CHROME_COOKIES_PATH}`);
-    console.error('\nMake sure Google Chrome is installed and you have visited recorder.google.com.');
-    process.exit(1);
+    return false;
   }
 
-  // Get encryption key from Keychain
-  console.log('Reading Chrome encryption key from Keychain...');
-  console.log('(You may see a macOS dialog asking for Keychain access — please approve it)\n');
   const password = getChromeEncryptionKey();
   const key = deriveKey(password);
-  console.log('Encryption key obtained.\n');
 
-  // Copy the database (Chrome locks it while running)
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
@@ -141,10 +129,8 @@ export async function extractChromeCookies(authUser: number): Promise<void> {
   copyFileSync(CHROME_COOKIES_PATH, tempDb);
 
   try {
-    // Open the copied database
     const db = new Database(tempDb, { readonly: true });
 
-    // Build domain filter for SQL
     const domainClauses = GOOGLE_DOMAINS.map((d) => `host_key = '${d}'`).join(' OR ');
     const query = `SELECT host_key, name, encrypted_value, path, is_secure, is_httponly, expires_utc FROM cookies WHERE ${domainClauses}`;
 
@@ -160,15 +146,8 @@ export async function extractChromeCookies(authUser: number): Promise<void> {
 
     db.close();
 
-    if (rows.length === 0) {
-      console.error('No Google cookies found in Chrome.');
-      console.error('Make sure you are logged in to Google in Chrome and have visited recorder.google.com.');
-      process.exit(1);
-    }
+    if (rows.length === 0) return false;
 
-    console.log(`Found ${rows.length} Google cookies.\n`);
-
-    // Decrypt all cookie values
     const cookieParts: string[] = [];
     const seen = new Set<string>();
     let hasSapisid = false;
@@ -184,30 +163,61 @@ export async function extractChromeCookies(authUser: number): Promise<void> {
       if (row.name === 'SAPISID') hasSapisid = true;
     }
 
-    if (!hasSapisid) {
-      console.error('SAPISID cookie not found. Make sure you are logged in to Google in Chrome.');
-      process.exit(1);
-    }
+    if (!hasSapisid) return false;
 
     const cookieString = cookieParts.join('; ');
-
-    // Save
     saveAuth(cookieString, authUser);
-    console.log('Cookies saved.\n');
-
-    // Test
-    console.log('Testing authentication...');
-    const valid = await testAuth();
-    if (valid) {
-      console.log('Authentication successful!');
-    } else {
-      console.log('Warning: Authentication test failed.');
-      console.log('Make sure you have visited recorder.google.com recently in Chrome.');
-    }
+    return true;
   } finally {
-    // Clean up temp file
     if (existsSync(tempDb)) {
       unlinkSync(tempDb);
     }
+  }
+}
+
+/**
+ * Extract Google cookies from Chrome — interactive version with console output.
+ */
+export async function extractChromeCookies(authUser: number): Promise<void> {
+  console.log('Chrome Cookie Extraction');
+  console.log('========================\n');
+
+  if (!existsSync(CHROME_COOKIES_PATH)) {
+    console.error('Chrome cookie database not found at:');
+    console.error(`  ${CHROME_COOKIES_PATH}`);
+    console.error('\nMake sure Google Chrome is installed and you have visited recorder.google.com.');
+    process.exit(1);
+  }
+
+  console.log('Reading Chrome encryption key from Keychain...');
+  console.log('(You may see a macOS dialog asking for Keychain access — please approve it)\n');
+
+  const ok = extractCookiesCore(authUser);
+  if (!ok) {
+    console.error('Failed to extract cookies. Make sure you are logged in to Google in Chrome.');
+    process.exit(1);
+  }
+
+  console.log('Cookies saved.\n');
+
+  console.log('Testing authentication...');
+  const valid = await testAuth();
+  if (valid) {
+    console.log('Authentication successful!');
+  } else {
+    console.log('Warning: Authentication test failed.');
+    console.log('Make sure you have visited recorder.google.com recently in Chrome.');
+  }
+}
+
+/**
+ * Silent cookie extraction — used by auto-refresh on API 401.
+ * Returns true on success, false on any failure (never throws).
+ */
+export async function extractChromeCookiesSilent(authUser: number): Promise<boolean> {
+  try {
+    return extractCookiesCore(authUser);
+  } catch {
+    return false;
   }
 }

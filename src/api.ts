@@ -38,17 +38,34 @@ function computeSapisidHash(sapisid: string, origin: string): string {
 }
 
 /**
- * Make an authenticated API request to the Recorder service.
+ * Try to refresh cookies from Chrome automatically.
+ * Returns fresh AuthData on success, null on failure.
  */
-async function apiRequest<T>(
+async function tryAutoRefresh(authUser: number): Promise<AuthData | null> {
+  try {
+    const { extractChromeCookiesSilent } = await import('./chrome-cookies.js');
+    const ok = await extractChromeCookiesSilent(authUser);
+    if (ok) {
+      return loadAuth();
+    }
+  } catch {
+    // Chrome cookie extraction not available (not macOS, Chrome not installed, etc.)
+  }
+  return null;
+}
+
+/**
+ * Make a single authenticated API request.
+ */
+function makeApiRequest<T>(
   endpoint: string,
   body: unknown[],
   auth: AuthData
-): Promise<T> {
+): Promise<Response> {
   const url = `${API_BASE}/${endpoint}`;
   const authHeader = computeSapisidHash(auth.sapisid, ORIGIN);
 
-  const response = await fetch(url, {
+  return fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json+protobuf',
@@ -62,6 +79,28 @@ async function apiRequest<T>(
     },
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * Make an authenticated API request with automatic cookie refresh on 401.
+ */
+async function apiRequest<T>(
+  endpoint: string,
+  body: unknown[],
+  auth: AuthData,
+  onAuthRefreshed?: (newAuth: AuthData) => void
+): Promise<T> {
+  let response = await makeApiRequest(endpoint, body, auth);
+
+  // On 401, try to auto-refresh cookies from Chrome and retry
+  if (response.status === 401) {
+    const freshAuth = await tryAutoRefresh(auth.authUser);
+    if (freshAuth) {
+      process.stderr.write('Cookies expired — refreshed automatically from Chrome.\n');
+      onAuthRefreshed?.(freshAuth);
+      response = await makeApiRequest(endpoint, body, freshAuth);
+    }
+  }
 
   if (!response.ok) {
     const text = await response.text();
@@ -90,6 +129,11 @@ export class RecorderAPI {
   isAuthenticated(): boolean {
     return this.auth !== null && !!this.auth.sapisid;
   }
+
+  /** Called when auto-refresh produces new auth — updates the in-memory copy. */
+  private onAuthRefreshed = (newAuth: AuthData): void => {
+    this.auth = newAuth;
+  };
 
   private ensureAuth(): AuthData {
     if (!this.auth || !this.auth.sapisid) {
@@ -120,7 +164,8 @@ export class RecorderAPI {
     const response = await apiRequest<RecordingListResponse>(
       'GetRecordingList',
       [[{ '1': nowSeconds }], limit],
-      auth
+      auth,
+      this.onAuthRefreshed
     );
 
     if (!response || !response[0]) {
@@ -159,7 +204,8 @@ export class RecorderAPI {
     const response = await apiRequest<TranscriptionResponse>(
       'GetTranscription',
       [recordingId],
-      auth
+      auth,
+      this.onAuthRefreshed
     );
 
     if (!response || !response[0] || response[0].length === 0) {
@@ -236,18 +282,32 @@ export class RecorderAPI {
       throw new Error(`Invalid recording ID format: ${recordingId}. Expected UUID.`);
     }
 
-    const auth = this.ensureAuth();
+    let auth = this.ensureAuth();
 
-    const url = `https://usercontent.recorder.google.com/download/playback/${recordingId}?authuser=${auth.authUser}&download=true`;
+    const makeAudioRequest = (a: AuthData) => {
+      const url = `https://usercontent.recorder.google.com/download/playback/${recordingId}?authuser=${a.authUser}&download=true`;
+      return fetch(url, {
+        method: 'GET',
+        headers: {
+          'Cookie': a.cookies,
+          'Referer': ORIGIN + '/',
+        },
+        redirect: 'follow',
+      });
+    };
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Cookie': auth.cookies,
-        'Referer': ORIGIN + '/',
-      },
-      redirect: 'follow',
-    });
+    let response = await makeAudioRequest(auth);
+
+    // On 401 or 404 (audio endpoint returns 404 for expired cookies), auto-refresh
+    if (response.status === 401 || response.status === 404) {
+      const freshAuth = await tryAutoRefresh(auth.authUser);
+      if (freshAuth) {
+        process.stderr.write('Cookies expired — refreshed automatically from Chrome.\n');
+        this.auth = freshAuth;
+        auth = freshAuth;
+        response = await makeAudioRequest(auth);
+      }
+    }
 
     if (!response.ok) {
       const text = await response.text();
