@@ -16,6 +16,7 @@ Google Recorder is a voice recording app on Pixel phones that automatically tran
 ## Requirements
 
 - Node.js 20 or later
+- Google Chrome installed (used for the one-time login and silent cookie refresh)
 - A Google account with recordings synced to [recorder.google.com](https://recorder.google.com)
 
 ## Installation
@@ -41,90 +42,81 @@ node dist/cli.js <command>
 
 ## Authentication Setup
 
-The tool needs Google cookies from Chrome to authenticate. There are three methods:
+Authentication is a **single one-time browser login**. The tool keeps a dedicated,
+persistent Chrome profile (separate from your everyday browser) at
+`~/.config/google-recorder/browser-profile`. You log into Google there once; after
+that the CLI refreshes its own cookies **silently and headlessly** whenever they
+expire. There is **no macOS Keychain access and no repeated password prompts**.
 
-### Method 1: Automatic extraction from Chrome (recommended, macOS only)
-
-This reads cookies directly from Chrome's local database. No manual steps needed after initial Keychain approval.
-
-```bash
-google-recorder auth --chrome
-# With specific account index:
-google-recorder auth --chrome --authuser 1
-```
-
-On first run, macOS will ask for Keychain access to "Chrome Safe Storage" — click **Always Allow** so it doesn't prompt again. After that, `auth --chrome` works silently and can be run any time to refresh cookies.
-
-### Method 2: Playwright browser login (cross-platform)
-
-Opens a Chrome window with a persistent profile. You log in once; subsequent runs reuse the session.
-
-```bash
-google-recorder auth --browser
-# Headless refresh (after initial login):
-google-recorder auth --refresh
-```
-
-### Method 3: Manual cookie paste
-
-Copy cookies from Chrome DevTools:
-
-1. Open [recorder.google.com](https://recorder.google.com) in Chrome
-2. Open DevTools (`Cmd+Option+I` on Mac, `F12` on Windows/Linux)
-3. Go to the **Network** tab, refresh the page
-4. Click any request to `pixelrecorder-pa.clients6.google.com`
-5. In **Headers** → **Request Headers**, find **Cookie**
-6. Right-click the value and select **Copy value**
-7. Run and paste:
+### Log in (one time)
 
 ```bash
 google-recorder auth
 ```
 
-### Verify authentication
+This opens a Chrome window pointed at Recorder. Sign in to Google (if you aren't
+already), and the tool detects the login, saves cookies, and verifies them. You're
+done — `list`, `transcript`, `download`, etc. will work from then on.
+
+### How refresh works
+
+When an API call returns 401 (expired cookies), the CLI automatically launches the
+dedicated profile **headlessly**, grabs fresh cookies, and retries — no window, no
+prompt. You only need to run `google-recorder auth` again on the rare occasion that
+the dedicated profile's Google session itself fully expires (weeks/months). When
+that happens a command will print:
+
+```
+Authentication expired and could not be refreshed automatically.
+Run `google-recorder auth` once to log in (no password prompts after that).
+```
+
+### Other auth subcommands
 
 ```bash
-google-recorder auth --check
+google-recorder auth --check     # test the current saved session (no browser)
+google-recorder auth --refresh   # force a silent headless refresh
+google-recorder auth --manual    # fallback: paste a Cookie header from DevTools
+google-recorder auth --api-key <key>   # update the X-Goog-Api-Key
 ```
+
+> Removed: the old `auth --chrome` flow read Chrome's cookie database and decrypted
+> it with the macOS Keychain "Chrome Safe Storage" key. That popped a password
+> dialog on every read **and** can no longer decrypt modern Chrome's app-bound
+> (`v20`) cookies. `--chrome` is now just a deprecated alias that runs the browser
+> login.
 
 ### Multi-account users
 
-If you're signed into multiple Google accounts in Chrome, specify the account index. The index corresponds to `authuser` in Google URLs (0 for first account, 1 for second, etc.).
-
-```bash
-google-recorder auth --chrome --authuser 1
-```
+Because the dedicated profile holds a single signed-in account, `authuser` is
+normally `0` (the default). If you log multiple accounts into the dedicated profile,
+select one with `--authuser N` (matching the `authuser=N` in Google URLs).
 
 ### Auth storage
 
-Credentials are stored at `~/.config/google-recorder/auth.json` with restricted permissions (owner-only read/write). The file contains your browser cookies, so treat it as sensitive.
-
-### Cookie expiration
-
-Google cookies expire periodically. When authentication fails, just re-run your preferred auth method. With `--chrome`, this is a single command.
+Credentials are stored at `~/.config/google-recorder/auth.json` with restricted
+permissions (owner-only read/write). The file contains your browser cookies, so
+treat it as sensitive.
 
 ## Commands
 
 ### `auth` — Set up authentication
 
 ```bash
-# Automatic extraction from Chrome (recommended, macOS)
-google-recorder auth --chrome
-
-# Playwright browser login (cross-platform)
-google-recorder auth --browser
-
-# Headless cookie refresh (after Playwright login)
-google-recorder auth --refresh
-
-# Manual cookie paste
+# One-time browser login (default)
 google-recorder auth
 
-# With specific account index (works with all methods)
-google-recorder auth --chrome --authuser 1
-
-# Test existing authentication
+# Test existing authentication (no browser)
 google-recorder auth --check
+
+# Force a silent headless refresh
+google-recorder auth --refresh
+
+# Fallback: paste a Cookie header from DevTools
+google-recorder auth --manual
+
+# Select a Google account index if the profile has several (default: 0)
+google-recorder auth --authuser 1
 ```
 
 ### `list` — List recent recordings
@@ -295,12 +287,9 @@ Thanks for having me...
    npm install
    npm run build
    ```
-3. Authenticate (see [Authentication Setup](#authentication-setup)):
+3. Authenticate (see [Authentication Setup](#authentication-setup)) — one-time login:
    ```bash
-   # macOS (recommended):
-   google-recorder auth --chrome --authuser 0
-   # Other platforms:
-   google-recorder auth --browser
+   google-recorder auth
    ```
 4. Verify:
    ```bash
