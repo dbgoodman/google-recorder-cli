@@ -9,7 +9,6 @@ import { Command } from 'commander';
 import { RecorderAPI } from './api.js';
 import { runAuthCommand, getAuthFilePath, loadAuth } from './auth.js';
 import { browserAuth, refreshCookies } from './browser-auth.js';
-import { extractChromeCookies } from './chrome-cookies.js';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -26,11 +25,12 @@ program
 
 program
   .command('auth')
-  .description('Set up or test authentication with Google Recorder')
+  .description('Log in to Google Recorder (one-time browser login; no password prompts after)')
   .option('--check', 'Test existing authentication')
-  .option('--chrome', 'Extract cookies from Chrome automatically (recommended)')
-  .option('--browser', 'Authenticate via Playwright browser (persistent login)')
-  .option('--refresh', 'Headless cookie refresh via Playwright (no browser window)')
+  .option('--refresh', 'Silent headless cookie refresh (no browser window)')
+  .option('--manual', 'Paste a Cookie header from DevTools (fallback)')
+  .option('--browser', 'Alias for the default browser login')
+  .option('--chrome', 'Deprecated: keychain extraction was removed; runs the browser login instead')
   .option('--api-key <key>', 'Set the API key (from X-Goog-Api-Key header in DevTools)')
   .option('--authuser <n>', 'Google account index for multi-account users (default: 0)')
   .action(async (options) => {
@@ -44,22 +44,30 @@ program
       return;
     }
 
-    if (options.chrome) {
-      await extractChromeCookies(authUser);
-    } else if (options.browser) {
-      await browserAuth(authUser);
-    } else if (options.refresh) {
-      console.log('Refreshing cookies headlessly...');
+    if (options.check || options.manual) {
+      await runAuthCommand(options);
+      return;
+    }
+
+    if (options.refresh) {
+      console.log('Refreshing cookies silently...');
       const ok = await refreshCookies(authUser);
       if (ok) {
         console.log('Cookies refreshed successfully.');
       } else {
-        console.log('Headless refresh failed. Run `google-recorder auth --browser` to log in.');
+        console.log('Session expired. Run `google-recorder auth` to log in again.');
         process.exit(1);
       }
-    } else {
-      await runAuthCommand(options);
+      return;
     }
+
+    if (options.chrome) {
+      console.log('Note: --chrome (macOS Keychain extraction) has been removed.');
+      console.log('Using the browser login instead — no password prompts.\n');
+    }
+
+    // Default: one-time persistent browser login.
+    await browserAuth(authUser);
   });
 
 // ============================================================================
@@ -423,4 +431,7 @@ program
     }
   });
 
-program.parse();
+program.parseAsync().catch((err) => {
+  console.error(`\nError: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+});

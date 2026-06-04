@@ -38,20 +38,44 @@ function computeSapisidHash(sapisid: string, origin: string): string {
 }
 
 /**
- * Try to refresh cookies from Chrome automatically.
- * Returns fresh AuthData on success, null on failure.
+ * Try to refresh cookies automatically from the dedicated browser profile.
+ *
+ * This is fully silent — it reuses the persistent login captured by
+ * `google-recorder auth` and never touches the macOS Keychain or pops any
+ * dialog. Returns fresh AuthData on success, null if a re-login is needed.
  */
 async function tryAutoRefresh(authUser: number): Promise<AuthData | null> {
   try {
-    const { extractChromeCookiesSilent } = await import('./chrome-cookies.js');
-    const ok = await extractChromeCookiesSilent(authUser);
-    if (ok) {
+    const { refreshCookies } = await import('./browser-auth.js');
+    const refreshed = await refreshCookies(authUser);
+    if (refreshed) {
       return loadAuth();
     }
   } catch {
-    // Chrome cookie extraction not available (not macOS, Chrome not installed, etc.)
+    // Headless refresh unavailable (Chrome missing, profile gone, etc.).
   }
   return null;
+}
+
+/**
+ * Last-resort recovery when silent refresh fails: open the one-time login window
+ * so the user can re-establish the session. No password is stored or entered —
+ * the dedicated profile remembers the account, so this is typically just a Duo
+ * approval. Only fires in an interactive terminal; disable with
+ * GOOGLE_RECORDER_NO_AUTO_LOGIN=1.
+ */
+async function tryInteractiveRelogin(authUser: number): Promise<AuthData | null> {
+  if (!process.stdout.isTTY || !process.stdin.isTTY) return null;
+  if (process.env.GOOGLE_RECORDER_NO_AUTO_LOGIN) return null;
+  try {
+    process.stderr.write('\nYour Recorder session needs a fresh sign-in — opening a login window.\n');
+    process.stderr.write('(Account is remembered, so this is usually just a Duo approval. No password is stored.)\n');
+    const { browserAuth } = await import('./browser-auth.js');
+    await browserAuth(authUser);
+    return loadAuth();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -92,13 +116,19 @@ async function apiRequest<T>(
 ): Promise<T> {
   let response = await makeApiRequest(endpoint, body, auth);
 
-  // On 401, try to auto-refresh cookies from Chrome and retry
+  // On 401: silent headless refresh first; if that can't recover, fall back to a
+  // one-tap interactive re-login (when running in a terminal). Then retry.
   if (response.status === 401) {
-    const freshAuth = await tryAutoRefresh(auth.authUser);
+    const freshAuth = (await tryAutoRefresh(auth.authUser)) ?? (await tryInteractiveRelogin(auth.authUser));
     if (freshAuth) {
-      process.stderr.write('Cookies expired — refreshed automatically from Chrome.\n');
+      process.stderr.write('Authentication refreshed.\n');
       onAuthRefreshed?.(freshAuth);
       response = await makeApiRequest(endpoint, body, freshAuth);
+    } else {
+      throw new Error(
+        'Authentication expired and could not be refreshed automatically.\n' +
+        'Run `google-recorder auth` to sign in again (no password stored or prompted).'
+      );
     }
   }
 
@@ -218,7 +248,18 @@ export class RecorderAPI {
     let currentStartTime = '00:00';
 
     for (const segment of response[0]) {
-      const [words, speakerId] = segment;
+      if (!Array.isArray(segment)) {
+        continue;
+      }
+
+      const [rawWords, speakerId] = segment;
+      const words = Array.isArray(rawWords)
+        ? rawWords.filter((word) => Array.isArray(word))
+        : [];
+
+      if (words.length === 0) {
+        continue;
+      }
 
       if (speakerId !== currentSpeaker && currentText) {
         segments.push({
@@ -298,11 +339,12 @@ export class RecorderAPI {
 
     let response = await makeAudioRequest(auth);
 
-    // On 401 or 404 (audio endpoint returns 404 for expired cookies), auto-refresh
+    // On 401 or 404 (audio endpoint returns 404 for expired cookies): silent
+    // refresh, then one-tap interactive re-login as a fallback.
     if (response.status === 401 || response.status === 404) {
-      const freshAuth = await tryAutoRefresh(auth.authUser);
+      const freshAuth = (await tryAutoRefresh(auth.authUser)) ?? (await tryInteractiveRelogin(auth.authUser));
       if (freshAuth) {
-        process.stderr.write('Cookies expired — refreshed automatically from Chrome.\n');
+        process.stderr.write('Authentication refreshed.\n');
         this.auth = freshAuth;
         auth = freshAuth;
         response = await makeAudioRequest(auth);
