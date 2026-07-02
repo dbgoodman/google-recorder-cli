@@ -247,12 +247,22 @@ export class RecorderAPI {
     let currentText = '';
     let currentStartTime = '00:00';
 
+    // Speaker diarization is per-WORD: word[6] = [group, speakerId]. The legacy
+    // segment-level speaker_id (segment[1]) is now always 0, so relying on it
+    // collapses every recording into a single "Speaker 1". Read word[6][1] and
+    // start a new turn whenever the speaker changes. Recorder over-diarizes
+    // (many IDs for few people); downstream consolidation handles that.
+    const wordSpeaker = (word: unknown[]): number => {
+      const meta = word[6];
+      return Array.isArray(meta) && meta.length > 1 ? Number(meta[1]) : 0;
+    };
+
     for (const segment of response[0]) {
       if (!Array.isArray(segment)) {
         continue;
       }
 
-      const [rawWords, speakerId] = segment;
+      const rawWords = segment[0];
       const words = Array.isArray(rawWords)
         ? rawWords.filter((word) => Array.isArray(word))
         : [];
@@ -261,21 +271,22 @@ export class RecorderAPI {
         continue;
       }
 
-      if (speakerId !== currentSpeaker && currentText) {
-        segments.push({
-          speaker: `Speaker ${currentSpeaker + 1}`,
-          text: currentText.trim(),
-          startTime: currentStartTime,
-        });
-        currentText = '';
-      }
-
-      if (speakerId !== currentSpeaker) {
-        currentSpeaker = speakerId;
-        currentStartTime = words[0] ? formatTime(parseInt(words[0][2])) : '00:00';
-      }
-
       for (const word of words) {
+        const speakerId = wordSpeaker(word);
+
+        if (speakerId !== currentSpeaker) {
+          if (currentText) {
+            segments.push({
+              speaker: `Speaker ${currentSpeaker + 1}`,
+              text: currentText.trim(),
+              startTime: currentStartTime,
+            });
+            currentText = '';
+          }
+          currentSpeaker = speakerId;
+          currentStartTime = formatTime(parseInt(word[2]));
+        }
+
         const [text, formatted] = word;
         const wordText = formatted || text;
         currentText += wordText + ' ';

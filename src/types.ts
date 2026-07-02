@@ -68,12 +68,14 @@ export type RecordingListResponse = [
 
 // GetTranscription response:
 // [[[segments], ...]]
-// Each segment: [[words], speaker_id, language]
-// Each word: [text, formatted_text, start_ms_str, end_ms_str, ...]
+// Each segment: [[words], segment_speaker_id, language]
+// NOTE: as of ~2026-07 the segment-level speaker_id is always 0. The real
+// per-turn diarization moved INTO each word's last field: word[6] = [group, speakerId].
+// Each word: [text, formatted_text, start_ms_str, end_ms_str, null, null, [group, speakerId]]
 export type TranscriptionResponse = [
   Array<[
-    Array<[string, string | null, string, string, unknown, unknown, unknown]>,
-    number,  // speaker ID
+    Array<[string, string | null, string, string, unknown, unknown, [number, number] | unknown]>,
+    number,  // legacy segment-level speaker ID (now always 0)
     string,  // language code
   ]>
 ];
